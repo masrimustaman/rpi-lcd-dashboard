@@ -1,0 +1,14 @@
+[Unit]
+Description=3.5" LCD status panel (fbtft /dev/fb0)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/bin/lcd_status.py
+Restart=always
+RestartSec=5
+Nice=-5
+
+[Install]
+WantedBy=multi-user.target

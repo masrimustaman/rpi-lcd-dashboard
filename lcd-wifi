@@ -1,0 +1,18 @@
+#!/bin/bash
+# Query or toggle the Wi-Fi radio (NetworkManager) from a shell or SSH.
+case "${1:-status}" in
+  on)     nmcli radio wifi on ;;
+  off)    nmcli radio wifi off ;;
+  toggle)
+    if [ "$(nmcli -t -f WIFI radio)" = "enabled" ]; then
+      nmcli radio wifi off
+    else
+      nmcli radio wifi on
+    fi
+    ;;
+  status|*)
+    echo "radio: $(nmcli -t -f WIFI radio)"
+    echo "wlan0: $(nmcli -t -f GENERAL.STATE device show wlan0 | tail -1)"
+    echo "ssid : $(nmcli -t -f GENERAL.CONNECTION device show wlan0 | tail -1)"
+    ;;
+esac
