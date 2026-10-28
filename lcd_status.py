@@ -156,12 +156,22 @@ class Wifi:
         if self._conn is None or time.time() - self._conn_ts > max_age:
             self._conn = ""
             try:
+                # Resolve the active profile name, then ask that profile for its
+                # SSID — the connection list does not expose the wireless field.
                 out = subprocess.run(["nmcli", "-t", "-f", "GENERAL.CONNECTION",
                                       "device", "show", "wlan0"],
                                      capture_output=True, text=True, timeout=5).stdout
+                profile = ""
                 for line in out.splitlines():
                     if line.startswith("GENERAL.CONNECTION:"):
-                        self._conn = line.split(":", 1)[1].strip()
+                        profile = line.split(":", 1)[1].strip()
+                if profile:
+                    out = subprocess.run(["nmcli", "-t", "-f", "802-11-wireless.ssid",
+                                          "connection", "show", profile],
+                                         capture_output=True, text=True, timeout=5).stdout
+                    for line in out.splitlines():
+                        if line.startswith("802-11-wireless.ssid:"):
+                            self._conn = line.split(":", 1)[1].strip()
             except Exception:
                 pass
             self._conn_ts = time.time()
