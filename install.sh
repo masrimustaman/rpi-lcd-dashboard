@@ -12,7 +12,14 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 echo "== packages =="
 apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-    python3-pil python3-numpy fonts-dejavu-core libraspberrypi-bin
+    python3-pil python3-numpy fonts-dejavu-core
+
+# vcgencmd lives in libraspberrypi-bin on Bookworm and raspi-utils on Trixie.
+if ! command -v vcgencmd >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libraspberrypi-bin >/dev/null 2>&1 \
+      || DEBIAN_FRONTEND=noninteractive apt-get install -y -qq raspi-utils >/dev/null 2>&1 \
+      || echo "   note: vcgencmd unavailable, the throttle card will show '?'"
+fi
 
 echo "== files =="
 install -m 755 "$HERE/lcd_status.py"        /usr/local/bin/lcd_status.py
