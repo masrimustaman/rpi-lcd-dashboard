@@ -130,7 +130,7 @@ sudo rm /etc/lcd-status/touch.json && sudo systemctl restart lcd-status
 
 An earlier revision of this project shipped a display-only build and had `install.sh` blacklist `ads7846`, on the theory that the resistive layer had failed — one axis read full-scale no matter where you touched. That diagnosis was wrong. The driver really was loaded fine, and the degenerate fit that produced the full-scale axis came from the old wizard accepting a near-collinear set of taps. With the driver un-blacklisted and the fit sanity-checked, both axes track correctly.
 
-`install.sh` now removes any stale `blacklist-ads7846.conf`, adds `ads7846` to `/etc/modules`, and warns if `dtoverlay=nospi10` is present — that overlay disables `spi0.1`, which leaves the display working while silently killing touch.
+`install.sh` now removes any stale `blacklist-ads7846.conf`, adds `ads7846` to `/etc/modules`, and warns if `dtoverlay=nospi10` is present — that overlay disables `spi0.1`, which leaves the display working while silently killing touch. The `/etc/modules` line is belt-and-braces: udev normally autoloads the driver from the device-tree node's modalias, so removing the blacklist alone is enough.
 
 ## Troubleshooting
 
@@ -153,6 +153,11 @@ An earlier revision of this project shipped a display-only build and had `instal
 sudo ./uninstall.sh
 sudo reboot
 ```
+
+The panel goes **dark** rather than returning to a text console: on this setup
+`fbcon` does not re-attach to the ILI9486 framebuffer by itself (verified — the
+only bound vtconsole is the dummy device). Re-run `install.sh` to bring the
+dashboard back.
 
 ## License
 

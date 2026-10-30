@@ -19,4 +19,8 @@ fi
 systemctl daemon-reload
 systemctl reset-failed 2>/dev/null || true
 
-echo "removed.  Reboot to get the normal text console back on the LCD."
+# Measured on this panel: fbcon does not re-attach to the ILI9486 framebuffer by
+# itself, so the display goes dark instead of showing a text console.
+echo "removed.  Reboot to stop the panel.  Note it goes dark rather than showing"
+echo "a text console - fbcon stays unbound on this display.  Re-run install.sh to"
+echo "bring the dashboard back."

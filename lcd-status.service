@@ -1,5 +1,5 @@
 [Unit]
-Description=3.5" LCD status panel (fbtft /dev/fb0)
+Description=3.5" LCD status panel (fbtft, framebuffer auto-detected)
 After=network-online.target
 Wants=network-online.target
 
