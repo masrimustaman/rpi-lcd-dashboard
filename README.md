@@ -8,7 +8,7 @@ A tiny, dependency-light status panel for a **3.5" SPI TFT** on **Raspberry Pi O
 
 On Raspberry Pi OS Lite the SPI panel normally shows a 60×20 text console, which is hard to read at arm's length and buried under boot messages. This grabs the framebuffer, detaches the kernel console from it, and draws a 480×320 dashboard every 3 seconds.
 
-It is **read-only**: no web server, no telemetry, no network calls. Everything comes from `/proc`, `/sys` and `vcgencmd`.
+Apart from the two on-screen buttons, it is **read-only**: no web server, no telemetry, no network calls. Everything comes from `/proc`, `/sys` and `vcgencmd`.
 
 ## What it shows
 
@@ -21,6 +21,7 @@ It is **read-only**: no web server, no telemetry, no network calls. Everything c
 | Disk | `/` usage, matching `df` |
 | Uptime | uptime and `vcgencmd get_throttled` state |
 | Footer | Wi-Fi radio state / SSID, SSH hint |
+| Touch buttons | `WiFi` opens a radio/SSID detail sheet; `PWR` powers off after a confirmation step |
 
 ## Hardware
 
@@ -59,7 +60,7 @@ sudo ./install.sh
 sudo reboot
 ```
 
-`install.sh` installs `python3-pil`, `python3-numpy` and DejaVu fonts, copies the script and unit, blacklists the touch driver, and enables `lcd-status.service`.
+`install.sh` installs `python3-pil`, `python3-numpy` and DejaVu fonts, copies the scripts and unit, enables the `ads7846` touch driver, and enables `lcd-status.service`. On the first start after install the panel runs a short four-corner calibration (see [Touch panel](#touch-panel)).
 
 ## Configuration
 
@@ -75,13 +76,14 @@ After editing, `sudo systemctl restart lcd-status`.
 
 ## How it works
 
+- **The framebuffer is found, not assumed.** The panel is `fb0` on some boots and `fb1` on others, depending on what else claimed a framebuffer first. Rather than hardcoding `/dev/fb0`, the script scans `/sys/class/graphics/fb*` for the `fb_ili9486` driver name or a 480-pixel-wide virtual size, logs `fb: using /dev/fbN`, and logs `fb missing: ...` instead of silently retrying forever.
 - **Exclusive framebuffer.** On start the service writes `0` to `/sys/class/vtconsole/vtconN/bind` for the fbcon console, so kernel/getty output cannot overwrite the panel. It re-binds on clean shutdown, which puts the text console back.
-- **RGB565.** Pillow renders RGB, numpy packs it to 16-bit and the raw bytes are written at offset 0 of `/dev/fb0` — the format fbtft expects.
+- **RGB565.** Pillow renders RGB, numpy packs it to 16-bit and the raw bytes are written at offset 0 of the detected framebuffer — the format fbtft expects.
 - **Cheap.** Rendering plus the SPI push costs well under 1% of one core on a Pi 3B; `nmcli` is only spawned every 5–15 s and cached in between.
 
 ## Wi-Fi helper
 
-The buttons are gone (this build is display-only), so radio control is a shell one-liner:
+The `WiFi` button opens a sheet showing radio state, `wlan0` state and SSID, with a toggle. The same thing is available from a shell:
 
 ```bash
 sudo lcd-wifi status     # radio state, wlan0 state, SSID
@@ -94,13 +96,41 @@ It drives NetworkManager (`nmcli radio wifi ...`), and NM remembers the state ac
 
 ## Touch panel
 
-This build is **display-only**. `install.sh` blacklists the `ads7846` driver:
+The panel's resistive touch layer works, and drives two buttons in the header:
 
-```bash
-echo "blacklist ads7846" > /etc/modprobe.d/blacklist-ads7846.conf
+| Button | Action |
+|---|---|
+| `WiFi` | sheet with radio state, `wlan0` state, SSID, and an on/off toggle |
+| `PWR` | two-step confirmation, then `systemctl poweroff` |
+
+### Calibration
+
+Touch is calibrated in software against the raw controller range, so it works even when the panel's `tft35a` overlay has no touch section. On first run — or any time `/etc/lcd-status/touch.json` is missing — the dashboard draws four crosshairs in turn and waits for a tap on each.
+
+A fit is only accepted if it looks physically sane, because a least-squares fit on bad taps can pass a naive error check while being accurate at exactly one point:
+
+- the taps must span both raw axes (a line of taps is not enough to fit a plane)
+- no coefficient may exceed `1.0`
+- the residual must stay under `25 px`
+
+A rejected fit is reported in the journal and the wizard repeats. Accepted fits are logged with their residual, e.g. `calibration saved: ok resid=7.0px coef=0.1275`, and stored in `/etc/lcd-status/touch.json`:
+
+```python
+px = [-0.0011, -0.1275, +500.51]
+py = [+0.0852, +0.0026, -34.87]
 ```
 
-Remove that file and reboot if you have a healthy touch panel and want the driver back. (An earlier revision of this project had on-screen Wi-Fi/shutdown buttons with a four-corner calibration wizard; it was removed after the resistive layer on this particular panel failed — one axis read full-scale regardless of touch position.)
+To recalibrate, delete the file and restart the service:
+
+```bash
+sudo rm /etc/lcd-status/touch.json && sudo systemctl restart lcd-status
+```
+
+### Why an earlier revision gave up on touch
+
+An earlier revision of this project shipped a display-only build and had `install.sh` blacklist `ads7846`, on the theory that the resistive layer had failed — one axis read full-scale no matter where you touched. That diagnosis was wrong. The driver really was loaded fine, and the degenerate fit that produced the full-scale axis came from the old wizard accepting a near-collinear set of taps. With the driver un-blacklisted and the fit sanity-checked, both axes track correctly.
+
+`install.sh` now removes any stale `blacklist-ads7846.conf`, adds `ads7846` to `/etc/modules`, and warns if `dtoverlay=nospi10` is present — that overlay disables `spi0.1`, which leaves the display working while silently killing touch.
 
 ## Troubleshooting
 
@@ -112,6 +142,10 @@ Remove that file and reboot if you have a healthy touch panel and want the drive
 | Console text appears over the dashboard | the service isn't running, or fbcon re-bound itself — `systemctl status lcd-status` |
 | `no address` in the big slot | no interface has an IPv4 address (`ip -br addr`) |
 | Service restart loop | `journalctl -u lcd-status -n 30` |
+| Touch does nothing | `ads7846` blacklisted or not loaded — `lsmod \| grep ads7846`, `dmesg \| grep -i ads7846` |
+| Touch works but taps land in the wrong place | bad calibration — delete `/etc/lcd-status/touch.json` and restart to recalibrate |
+| Touch still dead after fixing the driver | `dtoverlay=nospi10` in `/boot/firmware/config.txt` disables `spi0.1`; comment it out |
+| Calibration keeps getting rejected | tap slowly and squarely on each crosshair; a line of taps or a double-tap on one target fails the span check |
 
 ## Uninstall
 

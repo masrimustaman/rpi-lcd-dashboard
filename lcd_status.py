@@ -19,9 +19,35 @@ import time
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np
 
+from lcd_touch import (Touch, Calibration, load_cal, fit_calibration,
+                       render_calibration, CAL_TARGETS)
+
 W, H = 480, 320
 FB = "/dev/fb0"
 INTERVAL = 3.0
+
+
+def find_fb():
+    """Locate the panel framebuffer by name/size (fb0/fb1 order changes on boot)."""
+    for i in range(8):
+        base = "/sys/class/graphics/fb%d" % i
+        try:
+            gname = open(base + "/name").read().strip().lower()
+            vsize = open(base + "/virtual_size").read().strip()
+        except OSError:
+            continue
+        if "ili9486" in gname or vsize.split(",")[0] == str(W):
+            return "/dev/fb%d" % i
+    return None
+
+BTN_WIFI = (300, 46, 370, 82)
+BTN_POWER = (378, 46, 448, 82)
+MODAL_CANCEL = (60, 240, 220, 288)
+MODAL_CONFIRM = (260, 240, 420, 288)
+
+
+def inside(rect, x, y):
+    return rect[0] <= x <= rect[2] and rect[1] <= y <= rect[3]
 
 BG = (11, 15, 20)
 CARD = (21, 28, 36)
@@ -222,7 +248,10 @@ def render(wifi):
     iface, ip, speed = primary_net()
     d.text((14, 48), f"{iface}  {speed}".strip(), font=f_tag, fill=ACCENT)
     d.text((14, 62), ip, font=f_ip, fill=TEXT)
-    d.text((W - 14, 54), "pilcd.local", font=f_small, fill=DIM, anchor="ra")
+    for rect, label in ((BTN_WIFI, "WiFi"), (BTN_POWER, "PWR")):
+        d.rounded_rectangle(rect, radius=8, fill=CARD, outline=TRACK, width=1)
+        d.text(((rect[0] + rect[2]) // 2, (rect[1] + rect[3]) // 2), label,
+               font=f_tag, fill=DIM, anchor="mm")
 
     wip = iface_ip("wlan0") if wifi.radio_on() else None
     if wip and iface != "wlan0":
@@ -298,10 +327,44 @@ def to_rgb565(img):
     return (r | g | b).astype("<u2").tobytes()
 
 
+def render_modal(base, title, rows, hint, danger=False):
+    img = base.copy()
+    d = ImageDraw.Draw(img)
+    d.rectangle((40, 58, W - 40, H - 30), fill=(15, 20, 26),
+                outline=RED if danger else TRACK)
+    d.text((60, 70), title, font=font("DejaVuSans-Bold.ttf", 16),
+           fill=RED if danger else ACCENT)
+    y = 100
+    for k, v in rows:
+        d.text((60, y), k, font=font("DejaVuSans.ttf", 12), fill=DIM)
+        d.text((160, y), str(v)[:30], font=font("DejaVuSans.ttf", 13), fill=TEXT)
+        y += 28
+    d.text((W // 2, H - 46), hint, font=font("DejaVuSans.ttf", 11),
+           fill=DIM, anchor="ma")
+    return img
+
+
+def render_confirm(base):
+    img = render_modal(base, "SHUT DOWN pilcd?",
+                       [("host", socket.gethostname()),
+                        ("uptime", fmt_uptime(uptime_s()))],
+                       "choose an action", danger=True)
+    d = ImageDraw.Draw(img)
+    for rect, label, col, bg in ((MODAL_CANCEL, "CANCEL", TEXT, CARD),
+                                 (MODAL_CONFIRM, "SHUT DOWN", RED, (60, 20, 20))):
+        d.rounded_rectangle(rect, radius=8, fill=bg,
+                            outline=TRACK if bg == CARD else RED)
+        d.text(((rect[0] + rect[2]) // 2, (rect[1] + rect[3]) // 2), label,
+               font=font("DejaVuSans-Bold.ttf", 13), fill=col, anchor="mm")
+    return img
+
+
 def main():
     con = Console()
     con.detach()
     wifi = Wifi()
+    touch = Touch()
+    st = {"cal": load_cal(), "raw": [], "modal": None, "msg": ""}
 
     stop = {"flag": False}
 
@@ -311,27 +374,91 @@ def main():
     signal.signal(signal.SIGTERM, bye)
     signal.signal(signal.SIGINT, bye)
 
+    def screen_tap(x, y):
+        if st["modal"] == "power":
+            if inside(MODAL_CONFIRM, x, y):
+                print("shutdown requested via panel", file=sys.stderr)
+                subprocess.run(["systemctl", "poweroff"])
+            st["modal"] = None
+        elif st["modal"] == "wifi":
+            st["modal"] = None
+        elif inside(BTN_WIFI, x, y):
+            st["modal"] = "wifi"
+        elif inside(BTN_POWER, x, y):
+            st["modal"] = "power"
+
+    def handle_tap(raw):
+        cal = st["cal"]
+        if not cal.ok:
+            st["raw"].append(raw)
+            if len(st["raw"]) >= 4:
+                c, note = fit_calibration(st["raw"][:4], CAL_TARGETS)
+                st["raw"] = []
+                st["msg"] = note
+                if c:
+                    c.save()
+                    st["cal"] = c
+                    print("calibration saved: " + note, file=sys.stderr)
+                else:
+                    print("calibration rejected: " + note, file=sys.stderr)
+            return
+        x, y = cal.map(raw)
+        print(f"tap raw={raw} -> screen=({x},{y})", file=sys.stderr)
+        screen_tap(x, y)
+
+    def draw(fb):
+        if not st["cal"].ok:
+            img = render_calibration(len(st["raw"]), st["msg"])
+        else:
+            img = render(wifi)
+            if st["modal"] == "wifi":
+                rows = [("radio", "enabled" if wifi.radio_on() else "disabled"),
+                        ("ssid", wifi.connection() or "not connected"),
+                        ("wlan0", iface_ip("wlan0") or "-")]
+                img = render_modal(img, "WIFI", rows, "tap anywhere to close")
+            elif st["modal"] == "power":
+                img = render_confirm(img)
+        fb.seek(0)
+        fb.write(to_rgb565(img))
+
     fb = None
+    dirty = True
+    last = 0.0
     while not stop["flag"]:
+        for etype, code, value in touch.events(0.1):
+            if etype == 3 and code == 0:
+                touch.last = (value, touch.last[1] if touch.last else 0)
+            elif etype == 3 and code == 1:
+                touch.last = (touch.last[0] if touch.last else 0, value)
+            elif etype == 1 and code == 330:
+                if value == 1:
+                    touch.pressed = True
+                    touch.press_t = time.time()
+                elif touch.pressed:
+                    touch.pressed = False
+                    if touch.last and time.time() - touch.press_t > 0.03:
+                        handle_tap(touch.last)
+                        dirty = True
+
+        now = time.time()
+        if not dirty and now - last < INTERVAL:
+            continue
         try:
             if fb is None:
-                fb = open(FB, "r+b", buffering=0)
-            fb.seek(0)
-            fb.write(to_rgb565(render(wifi)))
-        except FileNotFoundError:
+                path = find_fb() or FB
+                fb = open(path, "r+b", buffering=0)
+                print("fb: using " + path, file=sys.stderr)
+            draw(fb)
+            dirty = False
+            last = now
+        except FileNotFoundError as exc:
+            print("fb missing: %s" % exc, file=sys.stderr)
             fb = None
             time.sleep(2)
-            continue
         except Exception as exc:
             print(f"draw error: {exc}", file=sys.stderr)
             fb = None
             time.sleep(3)
-            continue
-
-        for _ in range(int(INTERVAL * 10)):
-            if stop["flag"]:
-                break
-            time.sleep(0.1)
 
     if fb:
         fb.close()

@@ -9,8 +9,13 @@ fi
 
 systemctl disable --now lcd-status.service 2>/dev/null || true
 rm -f /etc/systemd/system/lcd-status.service
-rm -f /usr/local/bin/lcd_status.py /usr/local/bin/lcd-wifi
+rm -f /usr/local/bin/lcd_status.py /usr/local/bin/lcd_touch.py /usr/local/bin/lcd-wifi
 rm -f /etc/modprobe.d/blacklist-ads7846.conf
+rm -rf /etc/lcd-status
+# Drop the boot-time module load added by install.sh.
+if [ -f /etc/modules ]; then
+    sed -i '/^ads7846$/d' /etc/modules
+fi
 systemctl daemon-reload
 systemctl reset-failed 2>/dev/null || true
 
